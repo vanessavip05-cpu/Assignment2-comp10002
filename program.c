@@ -1,337 +1,391 @@
-/* Grid path checker: reads a grid description (initial cell, goal cell,
- * blocks) followed by a proposed route, reports on the route's validity,
- * and draws the grid with the route on it.
- *
- * Input format:
- *   [RxC]          optional grid dimensions, e.g. 10x10 (default 10x10)
- *   [r,c]          initial cell
- *   [r,c]          goal cell
- *   [r,c] ...      zero or more blocked cells, one per line
- *   $              separator
- *   [r,c]->[r,c]->...  the proposed route, may be split across lines
+/* Grid route checker: reads a grid (optional dimensions, initial cell,
+ * goal cell, blocks), a '$' separator and a proposed route, then reports
+ * on the route and visualises it on the grid.
  */
-
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
+#include <assert.h>
 
-#define DEFAULT_ROWS 10
-#define DEFAULT_COLS 10
-#define CELLS_PER_LINE 5
-#define LINE_LEN 256
-#define SEPARATOR '$'
+// various separators used in input/output
+#define SEP0 '$'
+#define SEP1 "==STAGE %d=======================================\n"
+#define SEP2 "------------------------------------------------\n"
+#define SEP3 "================================================\n"
 
-#define CHAR_EMPTY ' '
-#define CHAR_BLOCK '#'
-#define CHAR_ROUTE '*'
-#define CHAR_INIT 'I'
-#define CHAR_GOAL 'G'
+// ASCII codes used in grid visualizations
+#define CELL_CODE_INITIAL 73 // 'I' - initial cell
+#define CELL_CODE_GOAL 71 // 'G' - goal cell
+#define CELL_CODE_BLOCK 35 // '#' - block cell
+#define CELL_CODE_EMPTY 32 // ' ' - empty cell
+#define CELL_CODE_VISITED 42 // '*' - visited cell
 
-#define STATUS_VALID 0
-#define STATUS_BAD_INIT 1
-#define STATUS_BAD_GOAL 2
-#define STATUS_BAD_MOVE 3
-#define STATUS_BLOCKED 4
+// route statuses
+#define ROUTE_STATUS_UNKNOWN 0 // Unknown route status
+#define ROUTE_INVALID_INITIAL 1 // Initial cell in the route is wrong!
+#define ROUTE_INVALID_GOAL 2 // Goal cell in the route is wrong!
+#define ROUTE_INVALID_MOVE 3 // There is an illegal move in this route!
+#define ROUTE_INVALID_BLOCK 4 // There is a block on this route!
+#define ROUTE_VALID 5 // The route is valid!
 
-#define BANNER_WIDTH 48
+#define MAX_CELLS_PER_LINE 5 // max number of cells to print per line
 
+// additional constants
+#define DEFAULT_ROWS 10 // grid rows when the input gives no dimensions
+#define DEFAULT_COLS 10 // grid columns when the input gives no dimensions
+#define INITIAL_CAPACITY 4 // initial size of the dynamic block array
+
+/* type definitions ----------------------------------------------------------*/
+
+// grid cell
 typedef struct {
-    int row, col;
+    short row; // row of the cell
+    short col; // column of the cell
+    unsigned int counter; // counter value associated with this cell
 } cell_t;
 
-typedef struct node node_t;
-struct node {
-    cell_t cell;
-    node_t *next;
+// state in a route
+typedef struct state state_t;
+struct state {
+    cell_t *cell; // pointer to a cell
+    state_t *next; // pointer to the next state in the route
 };
 
+// route (implemented as a linked list)
 typedef struct {
-    node_t *head, *foot;
-    int len;
-} list_t;
+    state_t *head; // pointer to the node in the head of the linked list
+    state_t *tail; // pointer to the node in the tail of the linked list
+} route_t;
 
+// grid
 typedef struct {
-    int rows, cols;
-    cell_t init, goal;
-    cell_t *blocks;
-    int nblocks;
+    int rows; // number of rows in the grid
+    int cols; // number of columns in the grid
+    cell_t initial; // initial cell
+    cell_t goal; // goal cell
+    cell_t *blocks; // dynamic array of blocked cells
+    int nblocks; // number of blocked cells
 } grid_t;
 
-/* ---------------- linked list ---------------- */
+/* function prototypes -------------------------------------------------------*/
+route_t* make_empty_route(void);
+void free_state(state_t*);
+void free_route(route_t* R);
+route_t* insert_at_head(route_t*, cell_t*);
+route_t* insert_at_tail(route_t*, cell_t*);
 
-static void list_init(list_t *list) {
-    list->head = list->foot = NULL;
-    list->len = 0;
+cell_t* make_cell(short row, short col);
+int read_cell(cell_t *cell);
+void read_grid(grid_t *grid);
+route_t* read_route(void);
+void free_grid(grid_t *grid);
+
+int same_cell(const cell_t *a, const cell_t *b);
+int in_grid(const grid_t *grid, const cell_t *cell);
+int is_block(const grid_t *grid, const cell_t *cell);
+int is_legal_move(const cell_t *from, const cell_t *to);
+int route_status(const grid_t *grid, const route_t *route);
+
+void print_grid_info(const grid_t *grid);
+void print_route(const route_t *route);
+void print_route_status(int status);
+void print_grid(const grid_t *grid, const route_t *route);
+
+/* main ----------------------------------------------------------------------*/
+
+int main(void) {
+    grid_t grid;
+    route_t *route;
+
+    read_grid(&grid);
+    route = read_route();
+
+    print_grid_info(&grid);
+    print_route(route);
+    print_route_status(route_status(&grid, route));
+
+    printf(SEP1, 1);
+    print_grid(&grid, route);
+    printf(SEP3);
+
+    free_route(route);
+    free_grid(&grid);
+    return EXIT_SUCCESS;
 }
 
-static void list_append(list_t *list, cell_t cell) {
-    node_t *node = malloc(sizeof(*node));
-    if (node == NULL) {
-        fprintf(stderr, "out of memory\n");
-        exit(EXIT_FAILURE);
-    }
-    node->cell = cell;
-    node->next = NULL;
-    if (list->foot == NULL) {
-        list->head = list->foot = node;
-    } else {
-        list->foot->next = node;
-        list->foot = node;
-    }
-    list->len++;
+/* linked list ---------------------------------------------------------------*/
+
+// creates an empty route
+route_t* make_empty_route(void) {
+    route_t *R = (route_t*)malloc(sizeof(*R));
+    assert(R != NULL);
+    R->head = R->tail = NULL;
+    return R;
 }
 
-static void list_free(list_t *list) {
-    node_t *curr = list->head, *next;
+// frees a state together with the cell it owns
+void free_state(state_t *s) {
+    assert(s != NULL);
+    free(s->cell);
+    free(s);
+}
+
+// frees all states of a route and the route itself
+void free_route(route_t* R) {
+    state_t *curr, *next;
+    assert(R != NULL);
+    curr = R->head;
     while (curr != NULL) {
         next = curr->next;
-        free(curr);
+        free_state(curr);
         curr = next;
     }
-    list_init(list);
+    free(R);
 }
 
-/* ---------------- input ---------------- */
+// inserts a cell at the head of a route; the route takes ownership of it
+route_t* insert_at_head(route_t *R, cell_t *cell) {
+    state_t *s = (state_t*)malloc(sizeof(*s));
+    assert(R != NULL && s != NULL);
+    s->cell = cell;
+    s->next = R->head;
+    R->head = s;
+    if (R->tail == NULL) {
+        R->tail = s;
+    }
+    return R;
+}
 
-/* Reads the next "[r,c]" cell from stdin, skipping anything before it.
- * Returns 1 on success, 0 if the separator or end of input is reached. */
-static int read_cell(cell_t *cell) {
+// inserts a cell at the tail of a route; the route takes ownership of it
+route_t* insert_at_tail(route_t *R, cell_t *cell) {
+    state_t *s = (state_t*)malloc(sizeof(*s));
+    assert(R != NULL && s != NULL);
+    s->cell = cell;
+    s->next = NULL;
+    if (R->tail == NULL) {
+        R->head = R->tail = s;
+    } else {
+        R->tail->next = s;
+        R->tail = s;
+    }
+    return R;
+}
+
+/* input ---------------------------------------------------------------------*/
+
+// allocates a new cell
+cell_t* make_cell(short row, short col) {
+    cell_t *cell = (cell_t*)malloc(sizeof(*cell));
+    assert(cell != NULL);
+    cell->row = row;
+    cell->col = col;
+    cell->counter = 0;
+    return cell;
+}
+
+// reads the next "[r,c]" from stdin; returns 0 at SEP0 or end of input
+int read_cell(cell_t *cell) {
     int c;
     while ((c = getchar()) != EOF && c != '[') {
-        if (c == SEPARATOR) {
+        if (c == SEP0) {
             return 0;
         }
     }
-    if (c == EOF) {
+    if (c == EOF || scanf("%hd,%hd]", &cell->row, &cell->col) != 2) {
         return 0;
     }
-    if (scanf("%d,%d]", &cell->row, &cell->col) != 2) {
-        return 0;
-    }
+    cell->counter = 0;
     return 1;
 }
 
-static void read_grid(grid_t *grid) {
-    char line[LINE_LEN];
-    int capacity = 4;
+// reads the optional "RxC" dimensions, initial cell, goal cell and blocks
+void read_grid(grid_t *grid) {
+    int capacity = INITIAL_CAPACITY;
     cell_t cell;
 
     grid->rows = DEFAULT_ROWS;
     grid->cols = DEFAULT_COLS;
-
-    /* the first non-empty line is either the dimensions or the initial cell */
-    do {
-        if (fgets(line, LINE_LEN, stdin) == NULL) {
-            fprintf(stderr, "unexpected end of input\n");
-            exit(EXIT_FAILURE);
-        }
-    } while (strspn(line, " \t\r\n") == strlen(line));
-
-    if (sscanf(line, " [%d,%d]", &grid->init.row, &grid->init.col) != 2) {
-        if (sscanf(line, "%dx%d", &grid->rows, &grid->cols) != 2
-            || !read_cell(&grid->init)) {
-            fprintf(stderr, "malformed input\n");
-            exit(EXIT_FAILURE);
-        }
+    if (scanf(" %dx%d", &grid->rows, &grid->cols) != 2) {
+        grid->rows = DEFAULT_ROWS;
+        grid->cols = DEFAULT_COLS;
     }
-    if (!read_cell(&grid->goal)) {
+    if (!read_cell(&grid->initial) || !read_cell(&grid->goal)) {
         fprintf(stderr, "malformed input\n");
         exit(EXIT_FAILURE);
     }
 
     grid->nblocks = 0;
-    grid->blocks = malloc(capacity * sizeof(*grid->blocks));
-    if (grid->blocks == NULL) {
-        fprintf(stderr, "out of memory\n");
-        exit(EXIT_FAILURE);
-    }
-    /* blocks continue until the separator line */
+    grid->blocks = (cell_t*)malloc(capacity * sizeof(*grid->blocks));
+    assert(grid->blocks != NULL);
     while (read_cell(&cell)) {
         if (grid->nblocks == capacity) {
             capacity *= 2;
-            grid->blocks = realloc(grid->blocks,
-                                   capacity * sizeof(*grid->blocks));
-            if (grid->blocks == NULL) {
-                fprintf(stderr, "out of memory\n");
-                exit(EXIT_FAILURE);
-            }
+            grid->blocks = (cell_t*)realloc(grid->blocks,
+                                            capacity * sizeof(*grid->blocks));
+            assert(grid->blocks != NULL);
         }
         grid->blocks[grid->nblocks++] = cell;
     }
 }
 
-static void read_route(list_t *route) {
+// reads the route that follows SEP0, which may span several lines
+route_t* read_route(void) {
+    route_t *route = make_empty_route();
     cell_t cell;
-    list_init(route);
     while (read_cell(&cell)) {
-        list_append(route, cell);
+        insert_at_tail(route, make_cell(cell.row, cell.col));
     }
+    return route;
 }
 
-/* ---------------- route checks ---------------- */
-
-static int same_cell(cell_t a, cell_t b) {
-    return a.row == b.row && a.col == b.col;
+void free_grid(grid_t *grid) {
+    free(grid->blocks);
+    grid->blocks = NULL;
+    grid->nblocks = 0;
 }
 
-static int in_grid(const grid_t *grid, cell_t cell) {
-    return cell.row >= 0 && cell.row < grid->rows
-        && cell.col >= 0 && cell.col < grid->cols;
+/* route checks --------------------------------------------------------------*/
+
+int same_cell(const cell_t *a, const cell_t *b) {
+    return a->row == b->row && a->col == b->col;
 }
 
-static int is_block(const grid_t *grid, cell_t cell) {
+int in_grid(const grid_t *grid, const cell_t *cell) {
+    return cell->row >= 0 && cell->row < grid->rows
+        && cell->col >= 0 && cell->col < grid->cols;
+}
+
+int is_block(const grid_t *grid, const cell_t *cell) {
     int i;
     for (i = 0; i < grid->nblocks; i++) {
-        if (same_cell(grid->blocks[i], cell)) {
+        if (same_cell(&grid->blocks[i], cell)) {
             return 1;
         }
     }
     return 0;
 }
 
-static int is_legal_move(cell_t from, cell_t to) {
-    return abs(from.row - to.row) + abs(from.col - to.col) == 1;
+// a legal move goes up, down, left or right by exactly one cell
+int is_legal_move(const cell_t *from, const cell_t *to) {
+    return abs(from->row - to->row) + abs(from->col - to->col) == 1;
 }
 
-static int route_status(const grid_t *grid, const list_t *route) {
-    node_t *curr;
+int route_status(const grid_t *grid, const route_t *route) {
+    state_t *s;
 
-    if (route->head == NULL || !same_cell(route->head->cell, grid->init)) {
-        return STATUS_BAD_INIT;
+    if (route->head == NULL || !same_cell(route->head->cell, &grid->initial)) {
+        return ROUTE_INVALID_INITIAL;
     }
-    if (!same_cell(route->foot->cell, grid->goal)) {
-        return STATUS_BAD_GOAL;
+    if (!same_cell(route->tail->cell, &grid->goal)) {
+        return ROUTE_INVALID_GOAL;
     }
-    for (curr = route->head; curr != NULL; curr = curr->next) {
-        if (!in_grid(grid, curr->cell)
-            || (curr->next != NULL
-                && !is_legal_move(curr->cell, curr->next->cell))) {
-            return STATUS_BAD_MOVE;
+    for (s = route->head; s != NULL; s = s->next) {
+        if (!in_grid(grid, s->cell)
+            || (s->next != NULL && !is_legal_move(s->cell, s->next->cell))) {
+            return ROUTE_INVALID_MOVE;
         }
     }
-    for (curr = route->head; curr != NULL; curr = curr->next) {
-        if (is_block(grid, curr->cell)) {
-            return STATUS_BLOCKED;
+    for (s = route->head; s != NULL; s = s->next) {
+        if (is_block(grid, s->cell)) {
+            return ROUTE_INVALID_BLOCK;
         }
     }
-    return STATUS_VALID;
+    return ROUTE_VALID;
 }
 
-/* ---------------- output ---------------- */
+/* output --------------------------------------------------------------------*/
 
-static void print_route(const list_t *route) {
-    node_t *curr;
+void print_grid_info(const grid_t *grid) {
+    printf("The grid has %d rows and %d columns.\n", grid->rows, grid->cols);
+    printf("The grid has %d block(s).\n", grid->nblocks);
+    printf("The initial cell in the grid is [%d,%d].\n",
+           grid->initial.row, grid->initial.col);
+    printf("The goal cell in the grid is [%d,%d].\n",
+           grid->goal.row, grid->goal.col);
+}
+
+void print_route(const route_t *route) {
+    state_t *s;
     int count = 0;
-    for (curr = route->head; curr != NULL; curr = curr->next) {
-        printf("[%d,%d]", curr->cell.row, curr->cell.col);
+
+    printf("The proposed route in the grid is:\n");
+    for (s = route->head; s != NULL; s = s->next) {
+        printf("[%d,%d]", s->cell->row, s->cell->col);
         count++;
-        if (curr->next == NULL) {
+        if (s->next == NULL) {
             printf(".\n");
         } else {
             printf("->");
-            if (count % CELLS_PER_LINE == 0) {
+            if (count % MAX_CELLS_PER_LINE == 0) {
                 printf("\n");
             }
         }
     }
 }
 
-static void print_banner(const char *title) {
-    int printed = printf("%s", title);
-    while (printed++ < BANNER_WIDTH) {
-        putchar('=');
+void print_route_status(int status) {
+    switch (status) {
+    case ROUTE_INVALID_INITIAL:
+        printf("Initial cell in the route is wrong!\n");
+        break;
+    case ROUTE_INVALID_GOAL:
+        printf("Goal cell in the route is wrong!\n");
+        break;
+    case ROUTE_INVALID_MOVE:
+        printf("There is an illegal move in this route!\n");
+        break;
+    case ROUTE_INVALID_BLOCK:
+        printf("There is a block on this route!\n");
+        break;
+    case ROUTE_VALID:
+        printf("The route is valid!\n");
+        break;
+    default:
+        break;
     }
-    putchar('\n');
 }
 
-static void print_grid(const grid_t *grid, const list_t *route) {
-    char *cells;
-    node_t *curr;
+void print_grid(const grid_t *grid, const route_t *route) {
+    char *codes;
+    state_t *s;
     int r, c, i;
+    size_t size = (size_t)grid->rows * grid->cols;
 
-    cells = malloc((size_t)grid->rows * grid->cols);
-    if (cells == NULL) {
-        fprintf(stderr, "out of memory\n");
-        exit(EXIT_FAILURE);
+    codes = (char*)malloc(size);
+    assert(codes != NULL);
+    for (i = 0; i < (int)size; i++) {
+        codes[i] = CELL_CODE_EMPTY;
     }
-    memset(cells, CHAR_EMPTY, (size_t)grid->rows * grid->cols);
-
     for (i = 0; i < grid->nblocks; i++) {
-        if (in_grid(grid, grid->blocks[i])) {
-            cells[grid->blocks[i].row * grid->cols
-                  + grid->blocks[i].col] = CHAR_BLOCK;
+        if (in_grid(grid, &grid->blocks[i])) {
+            codes[grid->blocks[i].row * grid->cols + grid->blocks[i].col] =
+                CELL_CODE_BLOCK;
         }
     }
-    for (curr = route->head; curr != NULL; curr = curr->next) {
-        if (in_grid(grid, curr->cell)) {
-            cells[curr->cell.row * grid->cols + curr->cell.col] = CHAR_ROUTE;
+    for (s = route->head; s != NULL; s = s->next) {
+        if (in_grid(grid, s->cell)) {
+            codes[s->cell->row * grid->cols + s->cell->col] =
+                CELL_CODE_VISITED;
         }
     }
-    if (in_grid(grid, grid->init)) {
-        cells[grid->init.row * grid->cols + grid->init.col] = CHAR_INIT;
+    if (in_grid(grid, &grid->initial)) {
+        codes[grid->initial.row * grid->cols + grid->initial.col] =
+            CELL_CODE_INITIAL;
     }
-    if (in_grid(grid, grid->goal)) {
-        cells[grid->goal.row * grid->cols + grid->goal.col] = CHAR_GOAL;
+    if (in_grid(grid, &grid->goal)) {
+        codes[grid->goal.row * grid->cols + grid->goal.col] = CELL_CODE_GOAL;
     }
 
-    putchar(' ');
+    printf(" ");
     for (c = 0; c < grid->cols; c++) {
         printf("%d", c % 10);
     }
-    putchar('\n');
+    printf("\n");
     for (r = 0; r < grid->rows; r++) {
         printf("%d", r % 10);
         for (c = 0; c < grid->cols; c++) {
-            putchar(cells[r * grid->cols + c]);
+            putchar(codes[r * grid->cols + c]);
         }
-        putchar('\n');
+        printf("\n");
     }
-    free(cells);
-}
-
-/* ---------------- main ---------------- */
-
-int main(void) {
-    grid_t grid;
-    list_t route;
-    int status;
-
-    read_grid(&grid);
-    read_route(&route);
-
-    printf("The grid has %d rows and %d columns.\n", grid.rows, grid.cols);
-    printf("The grid has %d block(s).\n", grid.nblocks);
-    printf("The initial cell in the grid is [%d,%d].\n",
-           grid.init.row, grid.init.col);
-    printf("The goal cell in the grid is [%d,%d].\n",
-           grid.goal.row, grid.goal.col);
-    printf("The proposed route in the grid is:\n");
-    print_route(&route);
-
-    status = route_status(&grid, &route);
-    switch (status) {
-    case STATUS_BAD_INIT:
-        printf("Initial cell in the route is wrong!\n");
-        break;
-    case STATUS_BAD_GOAL:
-        printf("Goal cell in the route is wrong!\n");
-        break;
-    case STATUS_BAD_MOVE:
-        printf("There is an illegal move in this route!\n");
-        break;
-    case STATUS_BLOCKED:
-        printf("There is a block on this route!\n");
-        break;
-    default:
-        printf("The route is valid!\n");
-        break;
-    }
-
-    print_banner("==STAGE 1");
-    print_grid(&grid, &route);
-    print_banner("");
-
-    list_free(&route);
-    free(grid.blocks);
-    return 0;
+    free(codes);
 }
