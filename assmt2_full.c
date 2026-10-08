@@ -87,7 +87,6 @@ route_t* insert_at_tail(route_t*, cell_t*);
 
 cell_t* make_cell(short row, short col);
 int read_cell(cell_t *cell);
-int more_input(void);
 void read_header(grid_t *grid);
 int read_blocks(grid_t *grid);
 int read_route(route_t *route);
@@ -116,7 +115,7 @@ main(int argc, char *argv[]) {
 	read_header(&grid);
 	read_blocks(&grid);
 	route = make_empty_route();
-	more = (read_route(route)==READ_SEP) && more_input();
+	more = (read_route(route)==READ_SEP);
 
 	printf(SEP1, 0);
 	print_grid_info(&grid);
@@ -134,7 +133,7 @@ main(int argc, char *argv[]) {
 		printf(SEP1, 2);
 		first = 1;
 		while (ok && more) {
-			more = (read_blocks(&grid)==READ_SEP) && more_input();
+			more = (read_blocks(&grid)==READ_SEP);
 			if (!first) {
 				printf(SEP3);
 			}
@@ -252,20 +251,6 @@ read_cell(cell_t *cell) {
 	}
 	cell->counter = 0;
 	return READ_CELL;
-}
-
-// returns 1 if anything other than whitespace is left in the input
-int
-more_input(void) {
-	int c;
-	while ((c=getchar())==' ' || c=='\t' || c=='\r' || c=='\n') {
-		/* skip whitespace */
-	}
-	if (c==EOF) {
-		return 0;
-	}
-	ungetc(c, stdin);
-	return 1;
 }
 
 // reads the optional "RxC" dimensions and the initial and goal cells
