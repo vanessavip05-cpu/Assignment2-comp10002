@@ -506,7 +506,7 @@ void
 print_grid(grid_t *grid, route_t *route){
     char *codes;
     state_t *s;
-    int r, c, i, size = grid->rows*grid->cols;
+    int r, c, i, last, size = grid->rows*grid->cols;
     codes = (char*)malloc(size);
     assert(codes!= NULL);
     for (i=0; i<size; i++){
@@ -535,7 +535,12 @@ print_grid(grid_t *grid, route_t *route){
     printf("\n");
     for (r=0; r<grid->rows; r++){
         printf("%d", r%10);
-        for (c=0; c<grid->cols; c++){
+        /* find the last non-empty cell, so no trailing spaces are printed */
+        last = grid->cols - 1;
+        while (last>=0 && codes[r*grid->cols + last] == CELL_CODE_EMPTY){
+            last--;
+        }
+        for (c=0; c<=last; c++){
             putchar(codes[r*grid->cols + c]);
         }
         printf("\n");
